@@ -1,0 +1,66 @@
+A continuación se detalla el propósito y funcionamiento de los archivos board.h, dwt.h y systick.c, comúnmente utilizados en el desarrollo de software para microcontroladores, especialmente en el ecosistema STM32.
+
+---
+
+### 1. board.h
+
+Este archivo es un "header" o archivo de cabecera de configuración. Su principal objetivo es abstraer el hardware específico de la placa de desarrollo que se está utilizando. Esto permite que el resto del código sea más genérico y portable entre diferentes placas.
+
+Funcionamiento principal:
+
+* **Selección de Placa:** Mediante la macro `BOARD`, se selecciona la placa de desarrollo activa. En este caso, está configurada para `NUCLEO_F103RC`.
+    
+* **Mapeo de Pines y Lógica:** Utilizando directivas de preprocesador (`#if`, `#elif`, `#endif`), el archivo asigna nombres genéricos y fáciles de recordar (como `LED_A_PIN` o `BTN_A_PRESSED`) a los pines físicos y a la lógica de funcionamiento específicos de la placa seleccionada.
+
+* **Ejemplo para la placa NUCLEO-F103RC:**
+    * `BTN_A_PIN`: Se mapea al pin `B1_Pin`.
+    * `BTN_A_PORT`: Se asocia al puerto `B1_GPIO_Port`.
+    * `BTN_A_PRESSED`: Define que el botón se considera presionado cuando su estado es `GPIO_PIN_RESET` (un nivel lógico bajo).
+    * `LED_A_PIN`: Se mapea al pin `LD2_Pin`.
+    * `LED_A_PORT`: Se asocia al puerto `LD2_GPIO_Port`.
+    * `LED_A_ON`: Define que el LED se enciende con un `GPIO_PIN_SET` (un nivel lógico alto).
+
+En resumen, `board.h` actúa como una capa de abstracción de hardware (HAL - Hardware Abstraction Layer) muy básica, permitiendo que el programador utilice alias como `LED_A_ON` en lugar de tener que recordar el pin, puerto y estado lógico exacto para cada placa distinta.
+
+---
+
+### 2. dwt.h
+
+Este archivo de cabecera proporciona un conjunto de funciones para interactuar con el periférico DWT (Data Watchpoint and Trace) del microcontrolador. El DWT es una unidad presente en los núcleos ARM Cortex que, entre otras cosas, incluye un contador de ciclos de reloj del procesador (`CYCCNT`).
+
+El objetivo de este módulo es ofrecer una herramienta de medición de tiempo de alta precisión y muy bajo costo computacional (overhead), ideal para optimizar y analizar el rendimiento del código.
+
+Funciones clave:
+
+* `cycle_counter_init()`: Inicializa el contador. Habilita el hardware DWT, resetea el contador de ciclos y comienza a contar.
+* `cycle_counter_reset()`: Reinicia el contador de ciclos a `0`.
+* `cycle_counter_enable()` / `cycle_counter_disable()`: Permiten iniciar y detener el conteo de ciclos manipulando el bit `CYCCNTENA`.
+* `cycle_counter_get()`: Devuelve el número de ciclos de reloj transcurridos (`DWT->CYCCNT`).
+* `cycle_counter_get_time_us()`: Convierte el número de ciclos de reloj a microsegundos (`µs`), dividiendo el conteo por la frecuencia del sistema en MHz (`SystemCoreClock / 1000000`).
+
+Todas las funciones están declaradas como `static inline` y con el atributo `__attribute__((always_inline))`. Esto le indica al compilador que inserte el código de la función directamente en el lugar donde es llamada, evitando la sobrecarga de una llamada a función tradicional y garantizando la máxima precisión en las mediciones.
+
+En resumen, `dwt.h` es una utilidad de "profiling" que permite medir con exactitud cuántos ciclos de CPU o microsegundos tarda en ejecutarse una porción de código.
+
+---
+
+### 3. systick.c
+
+Este archivo implementa una función de retardo (delay) bloqueante utilizando el temporizador SysTick. El SysTick es un temporizador estándar descendente que forma parte del núcleo de los procesadores ARM Cortex-M.
+
+Funcionamiento de `systick_delay_us(uint32_t delay_us)`:
+
+1.  **Parámetro de Entrada:** La función recibe un único argumento, `delay_us`, que es el tiempo de retardo deseado en microsegundos.
+
+2.  **Cálculo del Objetivo:**
+    * Calcula la cantidad total de "ticks" o cuentas del temporizador que equivalen al retardo solicitado.
+    * La fórmula es: `target = delay_us * (SystemCoreClock / 1000000UL)`. Esto convierte los microsegundos a ciclos del SysTick, basándose en la frecuencia de reloj del sistema.
+
+3.  **Bucle de Espera (Blocking Delay):**
+    * La función entra en un bucle `while (1)`.
+    * Dentro del bucle, lee continuamente el valor actual del contador SysTick (`SysTick->VAL`).
+    * Calcula el tiempo transcurrido (`elapsed`) desde que se inició la función.
+    * El cálculo contempla correctamente el caso en que el contador pasa por cero y se recarga (wrap-around), ya que es un contador descendente.
+    * El bucle se rompe (`break`) únicamente cuando el número de ticks transcurridos (`elapsed`) es mayor o igual al objetivo (`target`).
+
+Este tipo de retardo se denomina "bloqueante" o "busy-waiting" porque el procesador se queda "atrapado" en el bucle `while`, sin poder ejecutar otras tareas hasta que el tiempo especificado haya transcurrido. Es una forma sencilla y precisa de generar retardos cortos.

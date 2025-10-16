@@ -1,0 +1,71 @@
+### Análisis y Explicación del Código Fuente
+
+El código proporcionado corresponde a una aplicación para un microcontrolador STM32 que implementa un planificador simple basado en eventos de tiempo (tick de sistema) para ejecutar una tarea que actualiza un display LCD. El sistema también incluye una biblioteca de logging para depuración.
+
+---
+
+#### **`app.c` - Núcleo de la Aplicación y Planificador**
+
+* **Función**: Este archivo es el corazón de la aplicación. Actúa como un planificador cooperativo muy simple.
+* **`app_init()`**: Se ejecuta una sola vez al inicio. Inicializa las tareas (en este caso, solo `task_test`), los contadores globales y el hardware para medir tiempos de ejecución. Utiliza `LOGGER_INFO()` para imprimir mensajes de inicio.
+* **`app_update()`**: Se llama continuamente desde el bucle infinito de `main.c`. Comprueba si ha ocurrido un "tick" del sistema (interrupción del `SysTick`). Si es así, ejecuta la función `update` de cada tarea registrada.
+* **Medición de Tiempo**: Dentro de `app_update()`, mide el tiempo de ejecución de cada tarea en microsegundos. Utiliza esta medición para actualizar dos variables clave:
+    * `g_app_runtime_us`: El tiempo total de ejecución de todas las tareas en un ciclo.
+    * `task_dta_list[index].WCET`: El "Tiempo de Ejecución en el Peor Caso" (Worst-Case Execution Time) para cada tarea individual, guardando el valor más alto medido hasta el momento.
+* **`HAL_SYSTICK_Callback()`**: Es la función que se ejecuta cada vez que ocurre la interrupción del `SysTick` (típicamente cada 1 ms). Su único propósito es incrementar los contadores `g_app_tick_cnt` y `g_task_test_tick_cnt`, que actúan como "banderas" para que `app_update` sepa que debe ejecutar las tareas.
+
+---
+
+#### **`task_test.c` - Tarea de Aplicación**
+
+* **Función**: Define la lógica de la única tarea del sistema. Su objetivo es inicializar y actualizar un display LCD.
+* **`task_test_init()`**: Se ejecuta una vez desde `app_init()`. Usa `LOGGER_INFO()` para imprimir sus propios mensajes de inicialización y configura el display LCD con un mensaje de bienvenida.
+* **`task_test_update()`**: Se ejecuta periódicamente desde `app_update()`. Su diseño es "no bloqueante". Procesa los ticks pendientes y llama a `task_test_statechart()`. **Es crucial notar que esta función no utiliza `LOGGER_INFO()` en su ejecución normal.**
+* **`task_test_statechart()`**: Contiene la lógica principal. Decrementa un contador interno y, cada 1000 ticks (1 segundo), actualiza un número en el display LCD.
+
+---
+
+#### **`logger.c` y `logger.h` - Biblioteca de Logging**
+
+* **Función**: Proporciona una forma de enviar mensajes de texto desde el microcontrolador al computador de depuración.
+* **`LOGGER_INFO()`**: Es una macro que simplifica el uso del logger.
+* **Mecanismo de Funcionamiento**:
+    1.  **Deshabilita Interrupciones**: Lo primero que hace la macro es ejecutar `__asm("CPSID i");`, lo que **detiene todas las interrupciones del sistema**, incluido el `SysTick`.
+    2.  **Formatea el Mensaje**: Usa `snprintf()` para crear la cadena de texto a imprimir. Esta función puede consumir bastante tiempo de CPU.
+    3.  **Imprime el Mensaje**: Llama a `logger_log_print_()`, que a su vez usa `printf()`. En este contexto (semihosting), `printf()` es una operación extremadamente **lenta**, ya que detiene el microcontrolador y se comunica con el depurador en la PC para mostrar el texto.
+    4.  **Habilita Interrupciones**: Finalmente, ejecuta `__asm("CPSIE i");` para reactivar las interrupciones.
+
+---
+
+### ### Impacto de `LOGGER_INFO()` en la Evolución de las Variables
+
+El uso de `LOGGER_INFO()` tiene un impacto muy diferente dependiendo de si se usa en la fase de inicialización o en el bucle principal.
+
+#### **Durante la Fase de Inicio (`app_init`)**
+
+En esta fase, tanto `app_init()` como `task_test_init()` llaman a `LOGGER_INFO()` varias veces.
+
+* **`g_app_runtime_us` (unidad: microsegundos)**
+    * **Impacto Nulo**. Esta variable solo se mide y actualiza dentro de `app_update()`. Como `app_init()` se ejecuta antes de que el bucle principal comience, el tiempo consumido por `LOGGER_INFO()` en la inicialización no se mide ni se almacena en `g_app_runtime_us`. Su valor sigue siendo el inicial (0).
+
+* **`task_dta_list[index].WCET` (unidad: microsegundos)**
+    * **Impacto Nulo**. Al igual que `g_app_runtime_us`, el `WCET` se inicializa a 0 en `app_init()` y solo se actualiza en `app_update()`. Por lo tanto, el uso intensivo del logger durante el arranque no afecta su valor inicial.
+
+* **`g_task_test_tick_cnt` (unidad: milisegundos / ticks)**
+    * **Impacto Significativo**. Aunque `LOGGER_INFO()` deshabilita las interrupciones *durante* su ejecución, estas se reactivan entre llamadas. Como el logging por semihosting es muy lento, pueden pasar muchos milisegundos mientras se imprimen todos los mensajes de inicio. Durante los intervalos en que las interrupciones están habilitadas, la interrupción del `SysTick` seguirá ocurriendo.
+    * **Evolución**: `HAL_SYSTICK_Callback()` se ejecutará varias veces en segundo plano mientras `app_init()` está ocupado. Como resultado, cuando `app_init()` termine y comience el primer `app_update()`, **`g_task_test_tick_cnt` ya tendrá un valor mayor que cero**, correspondiente a la cantidad de milisegundos que transcurrieron durante la lenta fase de inicialización.
+
+#### **Durante la Ejecución del Bucle Principal (`app_update`)**
+
+Al analizar `task_test.c`, se observa que `task_test_update()` **no contiene ninguna llamada a `LOGGER_INFO()`**. Por lo tanto:
+
+* **`g_app_runtime_us` (unidad: microsegundos)**
+    * **Sin Impacto Directo**. Dado que el logger no se llama, esta variable medirá únicamente el tiempo de ejecución real de la lógica de `task_test_update()` (procesar ticks, llamar a la máquina de estados, etc.). Su valor reflejará el rendimiento de la tarea en sí, no del logger.
+
+* **`task_dta_list[index].WCET` (unidad: microsegundos)**
+    * **Sin Impacto Directo**. Al igual que con `g_app_runtime_us`, el `WCET` almacenará el tiempo máximo de ejecución de la lógica de la tarea, sin la sobrecarga del logger. Su valor evolucionará solo si la propia tarea tiene un camino de ejecución que tarde más que los anteriores.
+
+* **`g_task_test_tick_cnt` (unidad: milisegundos / ticks)**
+    * **Sin Impacto Directo**. La variable seguirá su ciclo normal: será incrementada cada milisegundo por la interrupción del `SysTick` y decrementada por `task_test_update()` al ser procesada. La ausencia de llamadas al logger en el bucle principal asegura que no haya pausas inesperadas que impidan que la tarea procese los ticks a tiempo.
+
+**Conclusión clave**: El `LOGGER_INFO()` introduce un retardo muy grande, pero en este código, su impacto se limita a la fase de arranque, retrasando el inicio de la operación normal y causando que el contador de ticks ya tenga un valor acumulado al empezar. Durante la operación normal, no tiene influencia en las métricas de tiempo de ejecución.
